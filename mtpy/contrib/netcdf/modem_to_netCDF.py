@@ -10,7 +10,6 @@ interpolation is done in local grid to have the advantage of having the same
 unit for our three variables (east, north, depth in km).
 +++++++++++++++++
 """
-import os
 from os.path import join, abspath
 
 import numpy as np
@@ -19,8 +18,7 @@ from scipy.interpolate import interp2d
 from pyproj import Proj, transform
 
 from mtpy.modeling.modem import Model, Data
-from mtpy.utils import lib
-from mtpy.utils import nc
+from mtpy.contrib.netcdf import nc
 from mtpy.utils import gis_tools
 
 
@@ -157,6 +155,99 @@ def main():
                               result['latitude'], result['longitude'], result['depth'],
                               result['resistivity'], z_label='depth')
 
+def main_fun(dat_file, rho_file):
+    """ main function to run this script.
+    A netcdf file wgs84.nc will be produced (in current dir)
+    """
 
+    data = Data()
+    data.read_data_file(data_fn= dat_file)
+
+    # create a model object using the data object and read in model data
+    model = Model(data_obj=data)
+    model.read_model_file(model_fn= rho_file)
+
+    center = data.center_point
+
+    resistivity_data = {
+        'x': center.east.item() + (model.grid_east[1:] + model.grid_east[:-1])/2,
+        'y': center.north.item() + (model.grid_north[1:] + model.grid_north[:-1])/2,
+        'z': (model.grid_z[1:] + model.grid_z[:-1])/2,
+        'resistivity': np.transpose(model.res_model, axes=(2, 0, 1))
+    }
+
+    zone_number, is_northern, utm_zone = gis_tools.get_utm_zone(center.lat.item(), center.lon.item())
+
+    wgs84_proj = Proj(init='epsg:4326')
+    source_proj = Proj('+proj=utm +zone=%d +%s +datum=%s' % (zone_number, 'north' if is_northern else 'south', 'WGS84'))
+    to_wgs84 = converter(source_proj, wgs84_proj)
+    from_wgs84 = converter(wgs84_proj, source_proj)
+
+    center_lon, center_lat, width, height = lon_lat_grid_spacing(center, median_spacing(model.grid_east),
+                                                                 median_spacing(model.grid_north), to_wgs84)
+
+    lon_list = [to_wgs84(x, y)[0]
+                for x in resistivity_data['x']
+                for y in resistivity_data['y']]
+
+    lat_list = [to_wgs84(x, y)[1]
+                for x in resistivity_data['x']
+                for y in resistivity_data['y']]
+
+    interpolation_funcs = [interpolated_layer(resistivity_data['x'],
+                                              resistivity_data['y'],
+                                              resistivity_data['resistivity'][z_index, :, :])
+                           for z_index in range(resistivity_data['z'].shape[0])]
+
+    result = {
+        'longitude': uniform_interior_grid(sorted(lon_list), width, center_lon),
+        'latitude': uniform_interior_grid(sorted(lat_list), height, center_lat),
+        'depth': resistivity_data['z']
+    }
+
+    result['resistivity'] = np.zeros(tuple(result[key].shape[0]
+                                           for key in ['depth', 'latitude', 'longitude']))
+
+    def uniform_layer(interp_func, latitudes, longitudes):
+        """
+        Calculate the interpolated values for the layer.
+        """
+        lats, lons = latitudes.shape[0], longitudes.shape[0]
+
+        result = np.zeros((lats, lons))
+        for j in range(lons):
+            for i in range(lats):
+                lon, lat = longitudes[j], latitudes[i]
+                x, y = from_wgs84(lon, lat)
+
+                result[i, j] = interp_func(x, y)
+
+        return result
+
+    for z_index in range(result['depth'].shape[0]):
+        print 'layer #', z_index + 1
+        result['resistivity'][z_index, :, :] = uniform_layer(interpolation_funcs[z_index],
+                                                             result['latitude'], result['longitude'])
+
+    nc.write_resistivity_grid('wgs84.nc', 4326,
+                              result['latitude'], result['longitude'], result['depth'],
+                              result['resistivity'], z_label='depth')
+
+
+# ===============================================================================
+# u25656@PC-62907 MINGW64 /e/Githubz/ummazannat/mtpy (develop)
+# export PYTHONPATH=/e/Githubz/ummazannat/mtpy
+# python mtpy/contrib/netcdf/modem_to_netCDF.py examples/model_files/ModEM/ModEM_Data.dat examples/model_files/ModEM/ModEM_Model_File.rho
 if __name__ == '__main__':
-    main()
+
+
+    import sys
+
+    if len(sys.argv) <3:
+        print ("Please provide model data file and rho file to this program")
+        print ("Usage: %s /path2/modemfile.dat /path2/modemfile.rho " %(sys.argv[0]))
+        sys.exit(1)
+    else:
+        dat_file =sys.argv[1]
+        rho_file= sys.argv[2]
+        main_fun(dat_file, rho_file)

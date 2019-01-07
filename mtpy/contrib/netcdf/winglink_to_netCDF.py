@@ -10,7 +10,7 @@ col2 is lon, col3 is depth and col4 is resistivity. Here we interpolated the
 irregular points into a grid in global crs using the inverse distance weighing as the interpolator function.
 +++++++++++++++++
 """
-from mtpy.utils import interp, nc, lib
+from mtpy.contrib.netcdf import interp, lib, nc
 import numpy as np
 
 def main():
